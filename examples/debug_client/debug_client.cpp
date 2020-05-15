@@ -1,3 +1,6 @@
+// Compile with
+// c++ debug_client.cpp -lboost_system -lboost_chrono -lpthread -I /path/to/websocketpp
+
 /*
  * Copyright (c) 2014, Peter Thorson. All rights reserved.
  *
@@ -29,32 +32,26 @@
  * at any given time.
  */
 
-#include <websocketpp/config/asio_client.hpp>
+#include <websocketpp/config/debug_asio_no_tls.hpp>
 
 #include <websocketpp/client.hpp>
 
 #include <iostream>
 #include <chrono>
 
-typedef websocketpp::client<websocketpp::config::asio_client> client;
+typedef websocketpp::client<websocketpp::config::debug_asio> client;
+typedef websocketpp::config::debug_asio::message_type::ptr message_ptr;
 
 using websocketpp::lib::placeholders::_1;
 using websocketpp::lib::placeholders::_2;
 using websocketpp::lib::bind;
 
-// pull out the type of messages sent by our config
-typedef websocketpp::config::asio_tls_client::message_type::ptr message_ptr;
-typedef websocketpp::lib::shared_ptr<boost::asio::ssl::context> context_ptr;
-typedef client::connection_ptr connection_ptr;
-
-
-
-class perftest {
+class debug_client {
 public:
-    typedef perftest type;
+    typedef debug_client type;
     typedef std::chrono::duration<int,std::micro> dur_type;
 
-    perftest () {
+    debug_client () {
         m_endpoint.set_access_channels(websocketpp::log::alevel::all);
         m_endpoint.set_error_channels(websocketpp::log::elevel::all);
 
@@ -62,8 +59,6 @@ public:
         m_endpoint.init_asio();
 
         // Register our handlers
-        m_endpoint.set_socket_init_handler(bind(&type::on_socket_init,this,::_1));
-        //m_endpoint.set_tls_init_handler(bind(&type::on_tls_init,this,::_1));
         m_endpoint.set_message_handler(bind(&type::on_message,this,::_1,::_2));
         m_endpoint.set_open_handler(bind(&type::on_open,this,::_1));
         m_endpoint.set_close_handler(bind(&type::on_close,this,::_1));
@@ -72,43 +67,21 @@ public:
 
     void start(std::string uri) {
         websocketpp::lib::error_code ec;
-        client::connection_ptr con = m_endpoint.get_connection(uri, ec);
+        auto con = m_endpoint.get_connection(uri, ec);
 
         if (ec) {
             m_endpoint.get_alog().write(websocketpp::log::alevel::app,ec.message());
             return;
         }
 
-        //con->set_proxy("http://humupdates.uchicago.edu:8443");
-
         m_endpoint.connect(con);
 
         // Start the ASIO io_service run loop
-        m_start = std::chrono::high_resolution_clock::now();
         m_endpoint.run();
     }
 
-    void on_socket_init(websocketpp::connection_hdl) {
-        m_socket_init = std::chrono::high_resolution_clock::now();
-    }
-
-    context_ptr on_tls_init(websocketpp::connection_hdl) {
-        m_tls_init = std::chrono::high_resolution_clock::now();
-        context_ptr ctx = websocketpp::lib::make_shared<boost::asio::ssl::context>(boost::asio::ssl::context::tlsv1);
-
-        try {
-            ctx->set_options(boost::asio::ssl::context::default_workarounds |
-                             boost::asio::ssl::context::no_sslv2 |
-                             boost::asio::ssl::context::no_sslv3 |
-                             boost::asio::ssl::context::single_dh_use);
-        } catch (std::exception& e) {
-            std::cout << e.what() << std::endl;
-        }
-        return ctx;
-    }
-
     void on_fail(websocketpp::connection_hdl hdl) {
-        client::connection_ptr con = m_endpoint.get_con_from_hdl(hdl);
+        auto con = m_endpoint.get_con_from_hdl(hdl);
         
         std::cout << "Fail handler" << std::endl;
         std::cout << con->get_state() << std::endl;
@@ -120,43 +93,53 @@ public:
     }
 
     void on_open(websocketpp::connection_hdl hdl) {
-        m_open = std::chrono::high_resolution_clock::now();
-        m_endpoint.send(hdl, "", websocketpp::frame::opcode::text);
+        m_endpoint.send(hdl, "hello", websocketpp::frame::opcode::text);
+        start_timer(hdl);
     }
-    void on_message(websocketpp::connection_hdl hdl, message_ptr) {
-        m_message = std::chrono::high_resolution_clock::now();
-        m_endpoint.close(hdl,websocketpp::close::status::going_away,"");
-    }
-    void on_close(websocketpp::connection_hdl) {
-        m_close = std::chrono::high_resolution_clock::now();
 
-        std::cout << "Socket Init: " << std::chrono::duration_cast<dur_type>(m_socket_init-m_start).count() << std::endl;
-        std::cout << "TLS Init: " << std::chrono::duration_cast<dur_type>(m_tls_init-m_start).count() << std::endl;
-        std::cout << "Open: " << std::chrono::duration_cast<dur_type>(m_open-m_start).count() << std::endl;
-        std::cout << "Message: " << std::chrono::duration_cast<dur_type>(m_message-m_start).count() << std::endl;
-        std::cout << "Close: " << std::chrono::duration_cast<dur_type>(m_close-m_start).count() << std::endl;
+    void on_message(websocketpp::connection_hdl hdl, message_ptr msg) {
+        m_timeout->cancel();
+        std::cout << msg->get_payload() << std::endl;
+
+        std::this_thread::sleep_for(std::chrono::seconds(2));
+        on_open(hdl);
+    }
+
+    void on_close(websocketpp::connection_hdl hdl) {
+        auto con = m_endpoint.get_con_from_hdl(hdl);
+        auto close_code = con->get_remote_close_code();
+        std::cout << "Closed: " << close_code << std::endl;
+    }
+
+    void start_timer(websocketpp::connection_hdl hdl) {
+        // Set a timer to close the connection if we don't get a response.
+        auto con = m_endpoint.get_con_from_hdl(hdl);
+        m_timeout = con->set_timer(1000, [this, hdl](websocketpp::lib::error_code ec) {
+            if (ec != websocketpp::transport::error::operation_aborted) {
+                std::cout << "Timer expired with " << ec << std::endl;
+                m_endpoint.close(hdl, websocketpp::close::status::normal, "");
+            }
+        });
     }
 private:
     client m_endpoint;
-
-    std::chrono::high_resolution_clock::time_point m_start;
-    std::chrono::high_resolution_clock::time_point m_socket_init;
-    std::chrono::high_resolution_clock::time_point m_tls_init;
-    std::chrono::high_resolution_clock::time_point m_open;
-    std::chrono::high_resolution_clock::time_point m_message;
-    std::chrono::high_resolution_clock::time_point m_close;
+    client::connection_type::timer_ptr m_timeout;
 };
 
 int main(int argc, char* argv[]) {
-    std::string uri = "wss://echo.websocket.org";
+    // Matches debug_server
+    std::string uri = "ws://localhost:9012";
 
     if (argc == 2) {
         uri = argv[1];
     }
 
     try {
-        perftest endpoint;
+        debug_client endpoint;
         endpoint.start(uri);
+
+        std::cout << "Press enter to exit...";
+        std::cin.get();
     } catch (websocketpp::exception const & e) {
         std::cout << e.what() << std::endl;
     } catch (std::exception const & e) {
