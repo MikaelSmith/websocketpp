@@ -86,7 +86,7 @@ public:
     }
 
     context_ptr on_tls_init(websocketpp::connection_hdl) {
-        context_ptr ctx = websocketpp::lib::make_shared<boost::asio::ssl::context>(boost::asio::ssl::context::tlsv1);
+        context_ptr ctx = websocketpp::lib::make_shared<boost::asio::ssl::context>(boost::asio::ssl::context::tlsv12_client);
 
         try {
             ctx->set_options(boost::asio::ssl::context::default_workarounds |
