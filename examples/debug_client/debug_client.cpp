@@ -32,15 +32,16 @@
  * at any given time.
  */
 
-#include <websocketpp/config/debug_asio_no_tls.hpp>
+#include <websocketpp/config/debug_asio.hpp>
 
 #include <websocketpp/client.hpp>
 
 #include <iostream>
 #include <chrono>
 
-typedef websocketpp::client<websocketpp::config::debug_asio> client;
-typedef websocketpp::config::debug_asio::message_type::ptr message_ptr;
+typedef websocketpp::client<websocketpp::config::debug_asio_tls> client;
+typedef websocketpp::config::debug_asio_tls::message_type::ptr message_ptr;
+typedef websocketpp::lib::shared_ptr<boost::asio::ssl::context> context_ptr;
 
 using websocketpp::lib::placeholders::_1;
 using websocketpp::lib::placeholders::_2;
@@ -59,6 +60,7 @@ public:
         m_endpoint.init_asio();
 
         // Register our handlers
+        m_endpoint.set_tls_init_handler(bind(&type::on_tls_init,this,::_1));
         m_endpoint.set_message_handler(bind(&type::on_message,this,::_1,::_2));
         m_endpoint.set_open_handler(bind(&type::on_open,this,::_1));
         m_endpoint.set_close_handler(bind(&type::on_close,this,::_1));
@@ -78,6 +80,20 @@ public:
 
         // Start the ASIO io_service run loop
         m_endpoint.run();
+    }
+
+    context_ptr on_tls_init(websocketpp::connection_hdl) {
+        context_ptr ctx = websocketpp::lib::make_shared<boost::asio::ssl::context>(boost::asio::ssl::context::tlsv1);
+
+        try {
+            ctx->set_options(boost::asio::ssl::context::default_workarounds |
+                             boost::asio::ssl::context::no_sslv2 |
+                             boost::asio::ssl::context::no_sslv3 |
+                             boost::asio::ssl::context::single_dh_use);
+        } catch (std::exception& e) {
+            std::cout << e.what() << std::endl;
+        }
+        return ctx;
     }
 
     void on_fail(websocketpp::connection_hdl hdl) {
@@ -127,8 +143,8 @@ private:
 };
 
 int main(int argc, char* argv[]) {
-    // Matches debug_server
-    std::string uri = "ws://localhost:9012";
+    // Matches echo_server_tls
+    std::string uri = "wss://localhost:9002";
 
     if (argc == 2) {
         uri = argv[1];
