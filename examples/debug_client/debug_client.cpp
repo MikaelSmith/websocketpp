@@ -97,6 +97,7 @@ public:
     }
 
     void on_fail(websocketpp::connection_hdl hdl) {
+        m_open = false;
         auto con = m_endpoint.get_con_from_hdl(hdl);
         
         std::cout << "Fail handler" << std::endl;
@@ -109,22 +110,38 @@ public:
     }
 
     void on_open(websocketpp::connection_hdl hdl) {
-        m_endpoint.send(hdl, "hello", websocketpp::frame::opcode::text);
-        start_timer(hdl);
+        m_open = true;
+        // Start thread sending hello every few seconds
+        m_thread = websocketpp::lib::thread { &debug_client::spew, this, hdl };
     }
 
     void on_message(websocketpp::connection_hdl hdl, message_ptr msg) {
+        // Cancel current timer when we receive a response.
         m_timeout->cancel();
         std::cout << msg->get_payload() << std::endl;
-
-        std::this_thread::sleep_for(std::chrono::seconds(2));
-        on_open(hdl);
     }
 
     void on_close(websocketpp::connection_hdl hdl) {
         auto con = m_endpoint.get_con_from_hdl(hdl);
         auto close_code = con->get_remote_close_code();
         std::cout << "Closed: " << close_code << std::endl;
+        m_open = false;
+    }
+
+    void spew(websocketpp::connection_hdl hdl) {
+        while (m_open) {
+            try {
+                m_endpoint.send(hdl, "hello", websocketpp::frame::opcode::text);
+                start_timer(hdl);
+            } catch (websocketpp::exception &e) {
+                std::cout << "Send error: " << e.what() << std::endl;
+                break;
+            }
+
+            // Make sure this is longer than the timer timeout (currently 1000ms) so we
+            // don't overwrite the previous timer before it expires.
+            std::this_thread::sleep_for(std::chrono::seconds(2));
+        }
     }
 
     void start_timer(websocketpp::connection_hdl hdl) {
@@ -134,12 +151,15 @@ public:
             if (ec != websocketpp::transport::error::operation_aborted) {
                 std::cout << "Timer expired with " << ec << std::endl;
                 m_endpoint.close(hdl, websocketpp::close::status::normal, "");
+                m_thread.join();
             }
         });
     }
 private:
     client m_endpoint;
     client::connection_type::timer_ptr m_timeout;
+    websocketpp::lib::thread m_thread;
+    bool m_open;
 };
 
 int main(int argc, char* argv[]) {
