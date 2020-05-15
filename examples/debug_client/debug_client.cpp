@@ -62,6 +62,9 @@ public:
         // Register our handlers
         m_endpoint.set_tls_init_handler(bind(&type::on_tls_init,this,::_1));
         m_endpoint.set_message_handler(bind(&type::on_message,this,::_1,::_2));
+        m_endpoint.set_pong_handler(bind(&type::on_pong,this,::_1,::_2));
+        m_endpoint.set_pong_timeout(2000);
+        m_endpoint.set_pong_timeout_handler(bind(&type::on_pong_timeout,this,::_1,::_2));
         m_endpoint.set_open_handler(bind(&type::on_open,this,::_1));
         m_endpoint.set_close_handler(bind(&type::on_close,this,::_1));
         m_endpoint.set_fail_handler(bind(&type::on_fail,this,::_1));
@@ -112,54 +115,60 @@ public:
     void on_open(websocketpp::connection_hdl hdl) {
         m_open = true;
         // Start thread sending hello every few seconds
-        m_thread = websocketpp::lib::thread { &debug_client::spew, this, hdl };
+        m_thread = websocketpp::lib::thread { &debug_client::ping, this, hdl };
     }
 
     void on_message(websocketpp::connection_hdl hdl, message_ptr msg) {
-        // Cancel current timer when we receive a response.
-        m_timeout->cancel();
         std::cout << msg->get_payload() << std::endl;
     }
 
+    void on_pong(websocketpp::connection_hdl hdl, std::string payload) {
+        std::cout << "pong " << payload << std::endl;
+    }
+
+    void on_pong_timeout(websocketpp::connection_hdl hdl, std::string payload) {
+        if (m_timeouts < 2) {
+            m_timeouts++;
+            return;
+        }
+
+        m_open = false;
+        std::cout << "PONG TIMEOUT!" << std::endl;
+        m_endpoint.close(hdl, websocketpp::close::status::normal, "consecutive onPongTimeouts");
+        std::cout << "closed" << std::endl;
+    }
+
     void on_close(websocketpp::connection_hdl hdl) {
+        m_open = false;
         auto con = m_endpoint.get_con_from_hdl(hdl);
         auto close_code = con->get_remote_close_code();
         std::cout << "Closed: " << close_code << std::endl;
-        m_open = false;
     }
 
-    void spew(websocketpp::connection_hdl hdl) {
+    void ping(websocketpp::connection_hdl hdl) {
         while (m_open) {
-            try {
-                m_endpoint.send(hdl, "hello", websocketpp::frame::opcode::text);
-                start_timer(hdl);
-            } catch (websocketpp::exception &e) {
-                std::cout << "Send error: " << e.what() << std::endl;
+            std::cout << "Sending heartbeat" << std::endl;
+            websocketpp::lib::error_code ec;
+            m_endpoint.ping(hdl, "", ec);
+            if (ec) {
+                std::cout << "Ping error: " << ec << std::endl;
                 break;
             }
 
             // Make sure this is longer than the timer timeout (currently 1000ms) so we
             // don't overwrite the previous timer before it expires.
-            std::this_thread::sleep_for(std::chrono::seconds(2));
+            std::this_thread::sleep_for(std::chrono::seconds(6));
         }
     }
 
-    void start_timer(websocketpp::connection_hdl hdl) {
-        // Set a timer to close the connection if we don't get a response.
-        auto con = m_endpoint.get_con_from_hdl(hdl);
-        m_timeout = con->set_timer(1000, [this, hdl](websocketpp::lib::error_code ec) {
-            if (ec != websocketpp::transport::error::operation_aborted) {
-                std::cout << "Timer expired with " << ec << std::endl;
-                m_endpoint.close(hdl, websocketpp::close::status::normal, "");
-                m_thread.join();
-            }
-        });
+    void wait() {
+        m_thread.join();
     }
 private:
     client m_endpoint;
-    client::connection_type::timer_ptr m_timeout;
     websocketpp::lib::thread m_thread;
-    bool m_open;
+    uint8_t m_timeouts = 0;
+    bool m_open = false;
 };
 
 int main(int argc, char* argv[]) {
@@ -173,6 +182,7 @@ int main(int argc, char* argv[]) {
     try {
         debug_client endpoint;
         endpoint.start(uri);
+        endpoint.wait();
 
         std::cout << "Press enter to exit...";
         std::cin.get();
